@@ -1,0 +1,58 @@
+name: Promote staged videos
+
+on:
+  push:
+    paths:
+      - "staging/**"
+      - ".github/workflows/promote-staged-videos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decode staged base64 videos and commit
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          staged=(staging/*.mp4.b64)
+          if [ ${#staged[@]} -eq 0 ]; then
+            echo "No staged .mp4.b64 files to promote."
+            exit 0
+          fi
+          mkdir -p videos
+          for f in "${staged[@]}"; do
+            name="$(basename "$f" .b64)"
+            out="videos/${name}"
+            echo "Decoding ${f} -> ${out}"
+            base64 -d "$f" > "$out"
+            # Confirm MP4 magic (ftyp box) before committing.
+            if ! python3 - "$out" <<'PY'
+import sys
+p = sys.argv[1]
+data = open(p, "rb").read(64)
+if b"ftyp" not in data:
+    raise SystemExit(f"{p} does not look like an MP4 (missing ftyp)")
+print(f"ok: {p} size={len(open(p,'rb').read())}")
+PY
+            then
+              echo "Rejecting ${out}: not a valid MP4"
+              exit 1
+            fi
+            rm -f "$f"
+            git add "$out" "$f"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "Promote staged videos to videos/"
+          git push
